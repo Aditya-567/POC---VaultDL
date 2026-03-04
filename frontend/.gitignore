@@ -1,0 +1,18 @@
+# Frontend-specific ignores (root .gitignore covers the rest)
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
