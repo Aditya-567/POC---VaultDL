@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Contact from './components/Contact';
 import Marquee from './components/Marquee';
+import TorrentDownloader from './components/TorrentDownloader';
 import { downloadVideo, fetchVideoInfo } from './services/api';
 
 function Logo({ className = 'size-7' }) {
@@ -16,41 +17,71 @@ function Logo({ className = 'size-7' }) {
 
 function UrlInputForm({ url, setUrl, status, onSubmit }) {
     const [focused, setFocused] = useState(false);
+    const [activeTab, setActiveTab] = useState('yt');
     return (
-        <form onSubmit={onSubmit} className="w-full mx-auto">
+        <div className="w-full mx-auto">
             <div className="bg-white transition-all duration-300 flex flex-col gap-4 sm:gap-6">
-                <h2 className="text-sm sm:text-md text-start font-normal text-[#888] tracking-tight select-none">
-                    Paste The Link Here **
-                </h2>
 
-                {/* On mobile: stack input + button vertically; sm+: horizontal row */}
-                <div className={`flex flex-col sm:flex-row sm:items-center gap-3 border rounded-xl border-[#353935]/50 py-3 px-3 transition-colors duration-300 ${focused ? 'border-purple-400' : ''}`}>
-                    <div className="flex items-center gap-2 flex-1 min-w-0">
-                        <span className="material-symbols-outlined text-xl sm:text-2xl text-red-500 shrink-0 select-none">link</span>
-                        <input
-                            type="url"
-                            required
-                            placeholder="enter the link"
-                            className="flex-1 min-w-0 border-none outline-none font-mono focus:outline-none focus:ring-0 bg-transparent text-[#666] placeholder-slate-400 text-base sm:text-lg font-medium [&:invalid]:shadow-none"
-                            value={url}
-                            onFocus={() => setFocused(true)}
-                            onBlur={() => setFocused(false)}
-                            onChange={(e) => setUrl(e.target.value)}
-                            disabled={status === 'fetching'}
-                        />
+                <div className="flex justify-between items-center gap-2 ">
+                    <h2 className="text-sm sm:text-md text-start font-normal text-[#888] tracking-tight select-none">
+                        {activeTab === 'torrent' ? 'Enter a magnet link to start the torrent download process.' : 'Supported sites: YouTube, Facebook, Twitter, Instagram, TikTok, and many more!'}
+                       
+                    </h2>
+
+                    <div className='flex gap-1 bg-gray-100 rounded-full p-1.5'>
+                        <button
+                            type="button"
+                            onClick={() => setActiveTab('yt')}
+                            className={`text-xs font-semibold px-3 py-2.5 rounded-full transition-all ${activeTab === 'yt' ? 'bg-red-600 text-white shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                        >
+                            YT DOWNLOADER
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={() => setActiveTab('torrent')}
+                            className={`text-xs font-semibold px-3 py-2.5 rounded-full transition-all ${activeTab === 'torrent' ? 'bg-red-600 text-white shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                        >
+                            TORRENT DOWNLOADER
+                        </button>
                     </div>
-                    <button
-                        type="submit"
-                        disabled={status === 'fetching' || !url}
-                        className="w-full sm:w-auto outline-none focus:outline-none disabled:opacity-40 disabled:bg-gray-300 border border-slate-900 text-slate-900 bg-transparent hover:bg-slate-900 hover:text-white font-extrabold text-sm sm:text-base tracking-wide px-6 sm:px-10 md:px-16 py-3 sm:py-3.5 md:py-4 rounded-lg transition-all active:scale-95 flex items-center justify-center gap-2"
-                    >
-                        {status === 'fetching' ? (
-                            <><Loader2 className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" /> Analyzing...</>
-                        ) : 'Analyze'}
-                    </button>
+
                 </div>
+
+                {activeTab === 'yt' && (
+                    <form onSubmit={onSubmit}>
+                        {/* On mobile: stack input + button vertically; sm+: horizontal row */}
+                        <div className={`flex flex-col sm:flex-row sm:items-center gap-3 border rounded-xl border-[#353935]/50 py-1.5 pr-1.5 pl-3 transition-colors duration-300 ${focused ? 'border-purple-400' : ''}`}>
+                            <div className="flex items-center gap-2 flex-1 min-w-0">
+                                <span className="material-symbols-outlined text-xl sm:text-2xl text-red-500 shrink-0 select-none">link</span>
+                                <input
+                                    type="url"
+                                    required
+                                    placeholder="enter the link"
+                                    className="flex-1 min-w-0 border-none outline-none font-mono focus:outline-none focus:ring-0 bg-transparent text-[#666] placeholder-slate-400 text-base sm:text-lg font-medium [&:invalid]:shadow-none"
+                                    value={url}
+                                    onFocus={() => setFocused(true)}
+                                    onBlur={() => setFocused(false)}
+                                    onChange={(e) => setUrl(e.target.value)}
+                                    disabled={status === 'fetching'}
+                                />
+                            </div>
+                            <button
+                                type="submit"
+                                disabled={status === 'fetching' || !url}
+                                className="w-full sm:w-auto outline-none focus:outline-none disabled:opacity-40 disabled:bg-gray-300 border border-slate-900 text-slate-900 bg-transparent hover:bg-slate-900 hover:text-white font-extrabold text-sm sm:text-base tracking-wide px-6 sm:px-10 md:px-16 py-3 sm:py-3.5 md:py-4 rounded-lg transition-all active:scale-95 flex items-center justify-center gap-2"
+                            >
+                                {status === 'fetching' ? (
+                                    <><Loader2 className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" /> Analyzing...</>
+                                ) : 'Analyze'}
+                            </button>
+                        </div>
+                    </form>
+                )}
+
+                {activeTab === 'torrent' && <TorrentDownloader />}
             </div>
-        </form>
+        </div>
     );
 }
 
@@ -500,6 +531,8 @@ export default function App() {
                 {/* Step 1 — Nested Gradient Border Card */}
                 {showStep1 && (
                     <div className="w-full flex flex-col items-center justify-center  ">
+
+
                         <div className="mt-8 w-full  md:w-[85%] lg:w-[75%]  rounded-t-[40px] md:rounded-t-[80px] px-[4px] md:px-[6px] pt-[4px] md:pt-[6px] bg-gradient-to-r from-purple-600 via-purple-400 to-purple-600  animate-in slide-in-from-bottom-8 duration-700">
                             <div className="rounded-t-[36px] md:rounded-t-[74px] px-[4px] md:px-[6px] pt-[4px] md:pt-[6px] bg-gradient-to-r from-purple-500 via-pink-300 to-purple-500">
                                 <div className="rounded-t-[32px] md:rounded-t-[68px] px-[4px] md:px-[6px] pt-[4px] md:pt-[6px] bg-gradient-to-r from-purple-400 via-orange-200 to-purple-400">

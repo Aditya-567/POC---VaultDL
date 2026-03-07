@@ -1,7 +1,8 @@
-# 1. Install dependencies: pip install fastapi uvicorn yt-dlp pydantic flask-cors
-# 2. Run the server: uvicorn main:app --reload --port 8000
+# 1. Install dependencies: pip install fastapi uvicorn yt-dlp pydantic
+# 2. Make sure aria2 is installed: choco install aria2 -y
+# 3. Run the server: uvicorn main:app --reload --port 8000
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
@@ -9,8 +10,15 @@ import yt_dlp
 import os
 import shutil
 import tempfile
+import asyncio
+import re
+import uuid
 
-# Locate FFmpeg: use PATH if available, otherwise fall back to the known winget install path
+# ==========================================
+# --- 1. SETUP & CONFIGURATION ---
+# ==========================================
+
+# Locate FFmpeg
 _FFMPEG_FALLBACK = os.path.join(
     os.environ.get("LOCALAPPDATA", ""),
     "Microsoft", "WinGet", "Packages",
@@ -19,57 +27,85 @@ _FFMPEG_FALLBACK = os.path.join(
 )
 FFMPEG_LOCATION = shutil.which("ffmpeg") and os.path.dirname(shutil.which("ffmpeg")) or _FFMPEG_FALLBACK
 
-app = FastAPI(title="Secure YT-DLP API")
+_ARIA2_FALLBACK = os.path.join(os.environ.get("LOCALAPPDATA", ""), "aria2", "aria2c.exe")
+ARIA2_LOCATION = shutil.which("aria2c") or _ARIA2_FALLBACK
 
-# Security: Configure CORS to ONLY allow your React frontend's domain/IP
+app = FastAPI(title="Ultimate Download API (YT + Torrents)")
+
+# Security: Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://your-private-ip.com"],
+    allow_origins=["http://localhost:5173", "http://localhost:3000"], # Add your frontend ports
     allow_credentials=True,
-    allow_methods=["POST"],
+    allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition"],  # So browser JS can read the filename
+    expose_headers=["Content-Disposition", "Content-Length"],
 )
 
-# --- REQUEST MODELS ---
+# ==========================================
+# --- 2. WEBSOCKET MANAGER (For Progress) ---
+# ==========================================
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict[str, WebSocket] = {}
+
+    async def connect(self, websocket: WebSocket, client_id: str):
+        await websocket.accept()
+        self.active_connections[client_id] = websocket
+
+    def disconnect(self, client_id: str):
+        if client_id in self.active_connections:
+            del self.active_connections[client_id]
+
+    async def send_progress(self, client_id: str, message: dict):
+        if client_id in self.active_connections:
+            await self.active_connections[client_id].send_json(message)
+
+manager = ConnectionManager()
+
+# Single-use file store: token -> {file_path, temp_dir, filename}
+_pending_downloads: dict = {}
+
+
+# ==========================================
+# --- 3. REQUEST MODELS ---
+# ==========================================
+
 class InfoRequest(BaseModel):
     url: HttpUrl
 
 class DownloadRequest(BaseModel):
     url: HttpUrl
-    format_id: str  # The specific ID the user chose from the frontend (e.g., "18" or "137+bestaudio")
+    format_id: str 
+
+class MagnetRequest(BaseModel):
+    magnet_link: str
+    client_id: str  # Ties the HTTP request to the WebSocket connection
 
 
-# --- ENDPOINT 1: Fetch Available Formats ---
+# ==========================================
+# --- 4. YT-DLP ENDPOINTS (Untouched) ---
+# ==========================================
+
 @app.post("/api/info")
 async def get_video_info(request: InfoRequest):
-    """
-    Fetches video metadata and a list of available formats WITHOUT downloading the video.
-    """
     ydl_opts = {'noplaylist': True}
-    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # download=False means we just extract the info/metadata
             info = ydl.extract_info(str(request.url), download=False)
             
-            # Clean up the format list to send to the frontend
             available_formats = []
             for f in info.get('formats', []):
-                # Only include formats that actually have video or audio
                 if f.get('vcodec') != 'none' or f.get('acodec') != 'none':
-                    
                     has_video = f.get('vcodec') != 'none'
                     has_audio = f.get('acodec') != 'none'
-                    
-                    # Default format ID provided by YouTube
                     target_format_id = f.get("format_id")
                     
                     if has_video and has_audio:
                         type_label = "Video + Audio (Pre-merged)"
                     elif has_video:
                         type_label = "Video + Audio (High Quality Merge)"
-                        # MAGIC HAPPENS HERE: We tell yt-dlp to grab this video AND the best audio
                         target_format_id = f"{target_format_id}+bestaudio"
                     else:
                         type_label = "Audio Only"
@@ -83,61 +119,37 @@ async def get_video_info(request: InfoRequest):
                         "filesize_mb": round(f.get("filesize", 0) / (1024 * 1024), 2) if f.get("filesize") else "Unknown"
                     })
                     
-            # Sort formats by resolution (best to worst) just to make it look nice on the frontend
             available_formats.reverse()
-
-            # ADD A DEDICATED BEST AUDIO (MP3) OPTION AT THE TOP
             available_formats.insert(0, {
-                "format_id": "bestaudio_mp3",
-                "ext": "mp3",
-                "resolution": "Audio",
-                "note": "Highest Quality",
-                "type": "Audio Only (MP3 Extraction)",
-                "filesize_mb": "Auto"
+                "format_id": "bestaudio_mp3", "ext": "mp3", "resolution": "Audio",
+                "note": "Highest Quality", "type": "Audio Only (MP3 Extraction)", "filesize_mb": "Auto"
             })
 
             return {
-                "title": info.get("title"),
-                "thumbnail": info.get("thumbnail"),
-                "duration": info.get("duration_string"),
-                "formats": available_formats
+                "title": info.get("title"), "thumbnail": info.get("thumbnail"),
+                "duration": info.get("duration_string"), "formats": available_formats
             }
-            
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to fetch info: {str(e)}")
 
 
-# --- ENDPOINT 2: Download & Stream File to Browser ---
 @app.post("/api/download")
 async def trigger_download(request: DownloadRequest):
-    """
-    Downloads the video/audio to a temp folder, streams it directly to the
-    user's browser, then deletes the temp file. Nothing is kept on the server.
-    """
     url_str = str(request.url)
     format_id = request.format_id
-
-    # Create a throwaway temp directory for this single download
     temp_dir = tempfile.mkdtemp()
 
     ydl_opts = {
         'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-        'restrictfilenames': True,
-        'noplaylist': True,
-        'ffmpeg_location': FFMPEG_LOCATION,
+        'restrictfilenames': True, 'noplaylist': True, 'ffmpeg_location': FFMPEG_LOCATION,
     }
 
     if format_id == "bestaudio_mp3":
         ydl_opts['format'] = 'bestaudio/best'
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }]
+        ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
     else:
         ydl_opts['format'] = format_id
 
-    # Run the download synchronously so we can stream the result back
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url_str])
@@ -153,17 +165,178 @@ async def trigger_download(request: DownloadRequest):
     file_path = os.path.join(temp_dir, files[0])
     filename = files[0]
 
-    # Generator that streams the file in chunks, then cleans up the temp dir
     def stream_and_cleanup():
         try:
             with open(file_path, 'rb') as f:
-                while chunk := f.read(1024 * 1024):  # 1 MB chunks
+                while chunk := f.read(1024 * 1024):  
                     yield chunk
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     return StreamingResponse(
-        stream_and_cleanup(),
-        media_type='application/octet-stream',
+        stream_and_cleanup(), media_type='application/octet-stream',
         headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+    )
+
+
+# ==========================================
+# --- 5. ARIA2 TORRENT & WEBSOCKET ENDPOINTS ---
+# ==========================================
+
+@app.websocket("/api/ws/progress/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    """React connects here to listen for aria2 progress."""
+    await manager.connect(websocket, client_id)
+    try:
+        while True:
+            await websocket.receive_text() # Keep connection alive
+    except WebSocketDisconnect:
+        manager.disconnect(client_id)
+
+
+@app.post("/api/download-magnet")
+async def download_magnet_via_aria2(request: MagnetRequest):
+    """Downloads the torrent via aria2, sends progress over WS, then streams the file."""
+    magnet = request.magnet_link
+    client_id = request.client_id
+    
+    if not magnet.startswith("magnet:"):
+        raise HTTPException(status_code=400, detail="Invalid magnet link.")
+
+    temp_dir = tempfile.mkdtemp()
+    
+    command = [
+        ARIA2_LOCATION,
+        "--dir", temp_dir,
+        "--seed-time=0", # Stop uploading immediately
+        "--max-connection-per-server=16",
+        "--summary-interval=1", # Output progress every 1 second
+        magnet
+    ]
+    
+    # Immediately tell the frontend we received the request
+    await manager.send_progress(client_id, {"status": "connecting", "progress": 0, "message": "Starting aria2, connecting to peers..."})
+
+    loop = asyncio.get_event_loop()
+
+    def _run_aria2_blocking():
+        """Runs aria2c synchronously in a thread, posting progress back to the event loop."""
+        import subprocess
+        asyncio.run_coroutine_threadsafe(
+            manager.send_progress(client_id, {"status": "connecting", "progress": 0, "message": "aria2c launched, waiting for peers..."}),
+            loop
+        )
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding='utf-8',
+            errors='replace',
+        )
+        for line in proc.stdout:
+            size_match = re.search(r'([\d.]+(?:GiB|MiB|KiB|B))\/([\d.]+(?:GiB|MiB|KiB|B))\((\d+)%\)', line)
+            speed_match = re.search(r'DL:([\d.]+(?:GiB|MiB|KiB|B))\/s', line)
+            pct_match = re.search(r'\((\d+)%\)', line)
+            if size_match:
+                downloaded = size_match.group(1)
+                total = size_match.group(2)
+                percentage = int(size_match.group(3))
+                speed = (speed_match.group(1) + '/s') if speed_match else ''
+                asyncio.run_coroutine_threadsafe(
+                    manager.send_progress(client_id, {
+                        "status": "downloading",
+                        "progress": percentage,
+                        "downloaded": downloaded,
+                        "total": total,
+                        "speed": speed,
+                        "message": f"Downloading... {percentage}%"
+                    }),
+                    loop
+                )
+            elif pct_match:
+                percentage = int(pct_match.group(1))
+                asyncio.run_coroutine_threadsafe(
+                    manager.send_progress(client_id, {"status": "downloading", "progress": percentage, "message": f"Downloading... {percentage}%"}),
+                    loop
+                )
+            elif 'DL:' in line or 'ETA:' in line:
+                # Still active but no percentage yet (e.g. metadata phase)
+                asyncio.run_coroutine_threadsafe(
+                    manager.send_progress(client_id, {"status": "connecting", "progress": 0, "message": line.strip()}),
+                    loop
+                )
+        proc.wait()
+        if proc.returncode != 0:
+            stderr_msg = proc.stderr.read().strip()
+            raise RuntimeError(f"aria2c exited with code {proc.returncode}. stderr: {stderr_msg}")
+
+    try:
+        await loop.run_in_executor(None, _run_aria2_blocking)
+    except Exception as e:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Aria2 failed: {str(e)}")
+
+    # Tell the frontend the download finished and we are preparing the file stream
+    await manager.send_progress(client_id, {"status": "processing", "progress": 100})
+
+    # 4. Find the largest video file in the downloaded torrent folder
+    downloaded_file = None
+    largest_size = 0
+    for root, dirs, files in os.walk(temp_dir):
+        for file in files:
+            if file.endswith(('.mp4', '.mkv', '.avi', '.webm')):
+                filepath = os.path.join(root, file)
+                size = os.path.getsize(filepath)
+                if size > largest_size:
+                    largest_size = size
+                    downloaded_file = filepath
+
+    if not downloaded_file:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise HTTPException(status_code=404, detail="No video file found in the torrent.")
+
+    filename = os.path.basename(downloaded_file)
+    token = str(uuid.uuid4())
+    _pending_downloads[token] = {"file_path": downloaded_file, "temp_dir": temp_dir, "filename": filename}
+
+    # 5. Tell frontend the file is ready — it will open the GET endpoint as a native browser download
+    await manager.send_progress(client_id, {"status": "ready", "token": token, "filename": filename})
+    return {"status": "ok"}
+
+
+@app.get("/api/file/{token}")
+async def serve_pending_file(token: str):
+    """Single-use: serves the prepared file directly to the browser, then deletes the temp folder."""
+    entry = _pending_downloads.pop(token, None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="File not found or already downloaded.")
+
+    file_path: str = entry["file_path"]
+    temp_dir: str = entry["temp_dir"]
+    filename: str = entry["filename"]
+
+    if not os.path.exists(file_path):
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise HTTPException(status_code=404, detail="File no longer exists on disk.")
+
+    file_size = os.path.getsize(file_path)
+
+    def stream_and_cleanup():
+        try:
+            with open(file_path, 'rb') as f:
+                while chunk := f.read(1024 * 1024):
+                    yield chunk
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    media_type = "video/mp4" if filename.endswith(".mp4") else "application/octet-stream"
+
+    return StreamingResponse(
+        stream_and_cleanup(),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(file_size),
+        }
     )
