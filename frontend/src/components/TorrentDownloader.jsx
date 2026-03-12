@@ -49,7 +49,8 @@ export default function TorrentDownloader() {
         setTotalSize('');
         const clientId = Date.now().toString();
 
-        const ws = new WebSocket(`ws://localhost:8000/api/ws/progress/${clientId}`);
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/api/ws/progress/${clientId}`);
         wsRef.current = ws;
 
         ws.onopen = () => {

@@ -5,9 +5,11 @@
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, HttpUrl
 import yt_dlp
 import os
+import sys
 import shutil
 import tempfile
 import asyncio
@@ -95,8 +97,30 @@ async def get_video_info(request: InfoRequest):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(str(request.url), download=False)
             
+            def resolution_label(f):
+                """Return a friendly resolution label like 720p, 1080p, 2K, 4K."""
+                height = f.get('height')
+                if not height:
+                    return f.get('resolution') or "Audio"
+                if height >= 2160:
+                    return "4K (2160p)"
+                if height >= 1440:
+                    return "2K (1440p)"
+                if height >= 1080:
+                    return "1080p (Full HD)"
+                if height >= 720:
+                    return "720p (HD)"
+                if height >= 480:
+                    return "480p (SD)"
+                if height >= 360:
+                    return "360p"
+                return f"{height}p"
+
             available_formats = []
             for f in info.get('formats', []):
+                # Skip formats without a real URL (e.g. SABR-only android_vr streams)
+                if not f.get('url'):
+                    continue
                 if f.get('vcodec') != 'none' or f.get('acodec') != 'none':
                     has_video = f.get('vcodec') != 'none'
                     has_audio = f.get('acodec') != 'none'
@@ -113,7 +137,7 @@ async def get_video_info(request: InfoRequest):
                     available_formats.append({
                         "format_id": target_format_id,
                         "ext": f.get("ext"),
-                        "resolution": f.get("resolution") or "Audio",
+                        "resolution": resolution_label(f),
                         "note": f.get("format_note") or "",
                         "type": type_label,
                         "filesize_mb": round(f.get("filesize", 0) / (1024 * 1024), 2) if f.get("filesize") else "Unknown"
@@ -148,7 +172,8 @@ async def trigger_download(request: DownloadRequest):
         ydl_opts['format'] = 'bestaudio/best'
         ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
     else:
-        ydl_opts['format'] = format_id
+        # Append fallbacks so yt-dlp can recover if the exact format is unavailable
+        ydl_opts['format'] = f"{format_id}/bestvideo+bestaudio/best"
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -340,3 +365,15 @@ async def serve_pending_file(token: str):
             "Content-Length": str(file_size),
         }
     )
+
+# ==========================================
+# --- 6. SERVE DESKTOP UI ---
+# ==========================================
+if getattr(sys, 'frozen', False):
+    # Running as a PyInstaller .exe — files are in sys._MEIPASS
+    frontend_path = os.path.join(sys._MEIPASS, 'frontend', 'dist')
+else:
+    frontend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
+
+if os.path.exists(frontend_path):
+    app.mount("/", StaticFiles(directory=frontend_path, html=True), name="frontend")
