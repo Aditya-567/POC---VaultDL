@@ -265,7 +265,7 @@ export default function TorrentDownloader() {
 
             {status === 'done' && (
                 <div className="text-[#186e00] mt-4 font-semibold text-[15px]">
-                    ✅ Download started in your browser — check the downloads bar!
+                    ✅ Download complete! Check your downloads folder. If the file doesn't appear, please check your browser's download bar or settings.
                 </div>
             )}
 
