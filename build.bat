@@ -1,6 +1,9 @@
 @echo off
 echo Building VaultDL.exe...
 
+REM Kill any running instance so PyInstaller can overwrite the EXE
+taskkill /F /IM VaultDL.exe >nul 2>&1
+
 REM Build the React frontend first
 cd frontend
 call npm run build

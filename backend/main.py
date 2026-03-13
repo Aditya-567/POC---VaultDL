@@ -229,13 +229,66 @@ async def download_magnet_via_aria2(request: MagnetRequest):
         raise HTTPException(status_code=400, detail="Invalid magnet link.")
 
     temp_dir = tempfile.mkdtemp()
-    
+
+    # Public trackers for faster peer discovery on magnet links
+    trackers = ",".join([
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://open.tracker.cl:1337/announce",
+        "udp://tracker.openbittorrent.com:6969/announce",
+        "udp://open.stealth.si:80/announce",
+        "udp://tracker.torrent.eu.org:451/announce",
+        "udp://exodus.desync.com:6969/announce",
+        "udp://tracker.tiny-vps.com:6969/announce",
+        "udp://tracker.moeking.me:6969/announce",
+        "udp://explodie.org:6969/announce",
+        "udp://tracker.theoks.net:6969/announce",
+        "https://tracker.tamersunion.org:443/announce",
+        "udp://tracker1.bt.moack.co.kr:80/announce",
+        "udp://tracker.bittor.pw:1337/announce",
+        "udp://tracker.dump.cl:6969/announce",
+        "udp://tracker-udp.gbitt.info:80/announce",
+        "udp://opentracker.io:6969/announce",
+        "udp://new-line.net:6969/announce",
+        "udp://tracker.tryhackx.org:6969/announce",
+        "udp://carr.codes:6969/announce",
+        "udp://ttk2.nbarat.com:6969/announce",
+    ])
+
     command = [
         ARIA2_LOCATION,
         "--dir", temp_dir,
-        "--seed-time=0", # Stop uploading immediately
+        "--seed-time=0",
+        "--summary-interval=1",
         "--max-connection-per-server=16",
-        "--summary-interval=1", # Output progress every 1 second
+        "--split=32",
+        "--min-split-size=1M",
+        "--bt-max-peers=300",
+        "--bt-request-peer-speed-limit=0",
+        "--bt-tracker-connect-timeout=10",
+        "--bt-tracker-timeout=10",
+        "--enable-dht=true",
+        "--enable-dht6=true",
+        "--enable-peer-exchange=true",
+        "--bt-enable-lpd=true",
+        "--follow-torrent=mem",
+        "--file-allocation=none",
+        "--check-integrity=false",
+        f"--bt-tracker={trackers}",
+        "--dht-listen-port=6881-6999",
+        "--listen-port=6881-6999",
+        "--max-overall-download-limit=0",
+        "--max-download-limit=0",
+        "--max-concurrent-downloads=16",
+        "--optimize-concurrent-downloads=true",
+        "--piece-length=1M",
+        "--disk-cache=64M",
+        "--socket-recv-buffer-size=16777216",
+        "--bt-detach-seed-only=true",
+        "--bt-save-metadata=false",
+        "--bt-load-saved-metadata=false",
+        "--bt-remove-unselected-file=true",
+        "--allow-overwrite=true",
+        "--auto-file-renaming=false",
         magnet
     ]
     
@@ -257,23 +310,40 @@ async def download_magnet_via_aria2(request: MagnetRequest):
             stderr=subprocess.PIPE,
             encoding='utf-8',
             errors='replace',
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
+        def _to_mbps(value_str, unit_str):
+            """Convert aria2 speed like '5.2MiB' to Mbps string."""
+            try:
+                val = float(value_str)
+                multipliers = {'GiB': 8589.934592, 'MiB': 8.388608, 'KiB': 0.008192, 'B': 0.000008}
+                mbps = val * multipliers.get(unit_str, 0)
+                return f"{mbps:.2f} Mbps" if mbps >= 1 else f"{mbps * 1000:.0f} Kbps"
+            except (ValueError, TypeError):
+                return ''
+
         for line in proc.stdout:
             size_match = re.search(r'([\d.]+(?:GiB|MiB|KiB|B))\/([\d.]+(?:GiB|MiB|KiB|B))\((\d+)%\)', line)
-            speed_match = re.search(r'DL:([\d.]+(?:GiB|MiB|KiB|B))\/s', line)
+            speed_match = re.search(r'DL:([\d.]+)(GiB|MiB|KiB|B)\/s', line)
+            seed_match = re.search(r'SD:(\d+)', line)
+            peer_match = re.search(r'CN:(\d+)', line)
             pct_match = re.search(r'\((\d+)%\)', line)
             if size_match:
                 downloaded = size_match.group(1)
                 total = size_match.group(2)
                 percentage = int(size_match.group(3))
-                speed = (speed_match.group(1) + '/s') if speed_match else ''
+                speed_mbps = _to_mbps(speed_match.group(1), speed_match.group(2)) if speed_match else ''
+                seeds = int(seed_match.group(1)) if seed_match else 0
+                peers = int(peer_match.group(1)) if peer_match else 0
                 asyncio.run_coroutine_threadsafe(
                     manager.send_progress(client_id, {
                         "status": "downloading",
                         "progress": percentage,
                         "downloaded": downloaded,
                         "total": total,
-                        "speed": speed,
+                        "speed": speed_mbps,
+                        "seeds": seeds,
+                        "peers": peers,
                         "message": f"Downloading... {percentage}%"
                     }),
                     loop

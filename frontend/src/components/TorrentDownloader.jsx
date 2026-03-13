@@ -22,6 +22,8 @@ export default function TorrentDownloader() {
     const [downloadSpeed, setDownloadSpeed] = useState('');
     const [downloadedSize, setDownloadedSize] = useState('');
     const [totalSize, setTotalSize] = useState('');
+    const [seeds, setSeeds] = useState(0);
+    const [peers, setPeers] = useState(0);
     const wsRef = useRef(null);
     const [focused, setFocused] = useState(false);
 
@@ -47,6 +49,8 @@ export default function TorrentDownloader() {
         setDownloadSpeed('');
         setDownloadedSize('');
         setTotalSize('');
+        setSeeds(0);
+        setPeers(0);
         const clientId = Date.now().toString();
 
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -59,7 +63,7 @@ export default function TorrentDownloader() {
             setCurrentStage('aria2');
 
             // Fire the POST — the server will stream progress via WebSocket
-            fetch('http://localhost:8000/api/download-magnet', {
+            fetch('/api/download-magnet', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ magnet_link: magnetLink, client_id: clientId }),
@@ -92,6 +96,8 @@ export default function TorrentDownloader() {
                 if (data.speed !== undefined) setDownloadSpeed(data.speed);
                 if (data.downloaded !== undefined) setDownloadedSize(data.downloaded);
                 if (data.total !== undefined) setTotalSize(data.total);
+                if (data.seeds !== undefined) setSeeds(data.seeds);
+                if (data.peers !== undefined) setPeers(data.peers);
                 if (data.progress % 10 === 0 && data.progress > 0) {
                     addLog(`Download progress: ${data.progress}%`, 'info');
                 }
@@ -111,7 +117,7 @@ export default function TorrentDownloader() {
 
                 // Native browser download — no blob buffering, goes straight to download bar
                 const a = document.createElement('a');
-                a.href = `http://localhost:8000/api/file/${data.token}`;
+                a.href = `/api/file/${data.token}`;
                 a.download = data.filename;
                 document.body.appendChild(a);
                 a.click();
@@ -240,9 +246,14 @@ export default function TorrentDownloader() {
                                     ? `${downloadedSize.replace('GiB', 'GB').replace('MiB', 'MB').replace('KiB', 'KB')} / ${totalSize.replace('GiB', 'GB').replace('MiB', 'MB').replace('KiB', 'KB')}`
                                     : downloadedSize}
                             </span>
+                            <span className="text-[#888]">
+                                Seeds: <span className="font-semibold text-[#28a745]">{seeds}</span>
+                                {' · '}
+                                Peers: <span className="font-semibold text-[#e0a800]">{peers}</span>
+                            </span>
                             {downloadSpeed && (
                                 <span className="font-semibold text-[#007BFF]">
-                                    {downloadSpeed.replace('GiB', 'GB').replace('MiB', 'MB').replace('KiB', 'KB')}
+                                    {downloadSpeed}
                                 </span>
                             )}
                         </div>
